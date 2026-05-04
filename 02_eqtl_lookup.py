@@ -31,9 +31,10 @@ import pandas as pd
 from scipy import stats as sp_stats
 
 from config import (
-    GWAS_LOCI, ALL_GENES, BRYOIS_DIR, OUTPUT_DIR,
+    GWAS_LOCI, ALL_GENES, BRYOIS_DIR, GWAS_DIR, OUTPUT_DIR,
     BRYOIS_CT_PREFIX, BRYOIS_PSEUDO_PREFIX, BRYOIS_ALL_PREFIX,
     RANKING_CELL_TYPES, NEEDED_CHROMS, NOMINAL_P, BH_FDR, N_PERM,
+    GWAS_SUBTYPE_FILES, GWAS_COLUMN_MAP, GWAS_BUILD,
     snps_for_locus, genes_for_locus, setup_logging,
 )
 
@@ -185,9 +186,144 @@ def extract_eqtl_parallel(ncpus):
     return eqtl_df
 
 
+# ── Automatic GWAS lead-SNP lookup ────────────────────────────────────────────
+
+def lookup_gwas_lead_snps():
+    """Look up GWAS beta/SE/EAF for each lead SNP from the summary stats files.
+
+    Uses Bryois snp_pos.txt.gz for rsID -> hg38 position, then lifts over
+    to the GWAS build (hg19) to match by genomic position.
+
+    Returns dict: {locus_name: {gwas_label: {beta, se, eaf, pvalue}}}
+    """
+    log.info("=" * 72)
+    log.info("Looking up GWAS effect sizes for lead SNPs")
+    log.info("=" * 72)
+
+    # Load SNP positions (hg38)
+    snp_pos_path = BRYOIS_DIR / "snp_pos.txt.gz"
+    if not snp_pos_path.exists():
+        log.warning("  snp_pos.txt.gz not found — skipping GWAS lookup")
+        return {}
+
+    import gzip
+    rsid_to_hg38 = {}
+    with gzip.open(snp_pos_path, "rt") as f:
+        header = f.readline()
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) >= 3:
+                rsid_to_hg38[parts[0]] = (str(parts[1]).replace("chr", ""), int(parts[2]))
+
+    # Set up liftover if needed
+    liftover = None
+    if GWAS_BUILD != "hg38":
+        try:
+            from pyliftover import LiftOver
+            liftover = LiftOver("hg38", GWAS_BUILD)
+            log.info(f"  Liftover: hg38 -> {GWAS_BUILD}")
+        except ImportError:
+            log.warning("  pyliftover not installed — cannot match positions")
+            return {}
+
+    # For each lead SNP, get its position in the GWAS build
+    lead_snp_positions = {}  # {locus: (chr, hg19_pos)}
+    for locus, cfg in GWAS_LOCI.items():
+        rsid = cfg["rsid"]
+        hg38 = rsid_to_hg38.get(rsid)
+        if hg38 is None:
+            # Try proxies
+            for px_id, _ in cfg.get("proxies", []):
+                hg38 = rsid_to_hg38.get(px_id)
+                if hg38:
+                    rsid = px_id
+                    break
+        if hg38 is None:
+            log.info(f"  [{locus}] lead SNP position unknown — skipped")
+            continue
+
+        chrom, pos38 = hg38
+        if liftover:
+            result = liftover.convert_coordinate(f"chr{chrom}", pos38)
+            if result and len(result) > 0:
+                pos_gwas = int(result[0][1])
+            else:
+                log.info(f"  [{locus}] liftover failed for {rsid} — skipped")
+                continue
+        else:
+            pos_gwas = pos38
+
+        lead_snp_positions[locus] = (str(chrom), pos_gwas, rsid)
+
+    log.info(f"  {len(lead_snp_positions)}/{len(GWAS_LOCI)} lead SNP positions resolved")
+
+    # Look up each lead SNP in each GWAS file
+    gwas_effects = {}  # {locus: {gwas_label: {beta, se, eaf, pvalue}}}
+
+    for gwas_label, gwas_fname in GWAS_SUBTYPE_FILES.items():
+        gwas_path = GWAS_DIR / gwas_fname
+        if not gwas_path.exists():
+            continue
+
+        log.info(f"  Scanning {gwas_fname} for lead SNPs...")
+
+        # Read only needed columns
+        needed_cols = [c for c in GWAS_COLUMN_MAP.keys()
+                       if c in ["CHR", "BP", "BETA", "SE", "P", "A1_FREQ"]]
+        try:
+            df = pd.read_csv(gwas_path, sep="\t", usecols=needed_cols,
+                             dtype={"CHR": str, "BP": int})
+        except Exception as e:
+            log.error(f"    Failed to read: {e}")
+            continue
+
+        df = df.rename(columns=GWAS_COLUMN_MAP)
+        df["chr"] = df["chr"].astype(str).str.replace("chr", "")
+
+        for locus, (chrom, pos_gwas, rsid) in lead_snp_positions.items():
+            # Match by chr + position (allow ±1 bp for rounding)
+            match = df[(df["chr"] == chrom) &
+                       (df["pos"] >= pos_gwas - 1) &
+                       (df["pos"] <= pos_gwas + 1)]
+            if len(match) == 0:
+                continue
+            row = match.iloc[0]
+            if locus not in gwas_effects:
+                gwas_effects[locus] = {}
+            gwas_effects[locus][gwas_label] = {
+                "gwas_beta":  float(row["beta"]),
+                "gwas_se":    float(row["se"]),
+                "gwas_eaf":   float(row.get("eaf", np.nan)),
+                "gwas_pvalue": float(row["pvalue"]),
+            }
+
+    # Log summary
+    for locus in GWAS_LOCI:
+        effects = gwas_effects.get(locus, {})
+        if effects:
+            matched_sub = GWAS_LOCI[locus]["subtype"]
+            matched = effects.get(matched_sub) or effects.get("all_glioma") or next(iter(effects.values()))
+            log.info(f"  [{locus:10s}] beta={matched['gwas_beta']:+.4f}  "
+                     f"se={matched['gwas_se']:.4f}  p={matched['gwas_pvalue']:.2e}")
+        else:
+            log.info(f"  [{locus:10s}] not found in any GWAS file")
+
+    # Save the lookup table
+    rows = []
+    for locus, effects in gwas_effects.items():
+        for gwas_label, vals in effects.items():
+            rows.append({"locus": locus, "gwas": gwas_label, **vals})
+    if rows:
+        out = OUTPUT_DIR / "gwas_lead_snp_effects.csv"
+        pd.DataFrame(rows).to_csv(out, index=False)
+        log.info(f"  Saved {out}")
+
+    return gwas_effects
+
+
 # ── Within-locus multiple testing correction ─────────────────────────────────
 
-def correct_and_summarise(eqtl_df):
+def correct_and_summarise(eqtl_df, gwas_effects=None):
     """
     For each locus (primary gene, lead-or-proxy):
       1. Gather p-values across RANKING cell types (excluding Pseudobulk).
@@ -197,6 +333,8 @@ def correct_and_summarise(eqtl_df):
     log.info("=" * 72)
     log.info("Within-locus correction & summary")
     log.info("=" * 72)
+    if gwas_effects is None:
+        gwas_effects = {}
 
     # Primary gene = locus name; keep ranking cell types only
     primary = eqtl_df[
@@ -266,9 +404,19 @@ def correct_and_summarise(eqtl_df):
 
     summary = pd.DataFrame(rows).sort_values(["subtype", "best_pvalue"])
 
-    # ── Risk allele direction (if GWAS betas available) ──
-    summary["gwas_beta"] = summary["locus"].map(
-        lambda l: GWAS_LOCI[l].get("gwas_beta"))
+    # ── Risk allele direction ──
+    # Use auto-looked-up GWAS betas (subtype-matched, falling back to all_glioma)
+    def _get_matched_gwas_beta(locus):
+        effects = gwas_effects.get(locus, {})
+        if not effects:
+            return None
+        subtype = GWAS_LOCI[locus]["subtype"]
+        matched = effects.get(subtype) or effects.get("all_glioma")
+        if matched:
+            return matched["gwas_beta"]
+        return next(iter(effects.values()))["gwas_beta"]
+
+    summary["gwas_beta"] = summary["locus"].map(_get_matched_gwas_beta)
     has_gwas = summary["gwas_beta"].notna() & summary["best_beta"].notna()
     summary["concordant_direction"] = np.where(
         has_gwas,
@@ -364,7 +512,8 @@ def main():
     log.info(f"CPUs available: {ncpus}")
 
     eqtl_df = extract_eqtl_parallel(ncpus)
-    summary_df = correct_and_summarise(eqtl_df)
+    gwas_effects = lookup_gwas_lead_snps()
+    summary_df = correct_and_summarise(eqtl_df, gwas_effects)
     if not summary_df.empty:
         permutation_enrichment(summary_df)
 

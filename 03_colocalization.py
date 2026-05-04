@@ -198,11 +198,10 @@ def load_bryois_region(ct_prefix, chrom, gene_symbol, positions_in_region):
 # ── Per-locus colocalization ─────────────────────────────────────────────────
 
 def _coloc_one_locus(args):
-    """Run coloc for one locus across all ranking cell types."""
-    locus, rsid_to_pos, pos_to_rsid, liftover = args
+    """Run coloc for one locus × one GWAS across all ranking cell types."""
+    locus, gwas_label, rsid_to_pos, pos_to_rsid, liftover = args
     cfg = GWAS_LOCI[locus]
     chrom = cfg["chr"]
-    subtype = cfg["subtype"]
     gene = locus
 
     # Get genomic position of lead SNP (or proxy)
@@ -239,9 +238,9 @@ def _coloc_one_locus(args):
             gwas_center = pos_center  # fallback: positions usually close
 
     # Load subtype-matched GWAS region (in GWAS build coordinates)
-    gwas = load_gwas_region(subtype, chrom, gwas_center)
+    gwas = load_gwas_region(gwas_label, chrom, gwas_center)
     if gwas is None or gwas.empty:
-        return [{"locus": locus, "_skip": f"no GWAS data for {subtype} at chr{chrom}:{gwas_center}"}]
+        return [{"locus": locus, "gwas": gwas_label, "_skip": f"no GWAS data for {gwas_label} at chr{chrom}:{gwas_center}"}]
 
     # Liftover GWAS positions to hg38 for matching with Bryois
     if liftover is not None:
@@ -264,7 +263,7 @@ def _coloc_one_locus(args):
         if eqtl is None or eqtl.empty:
             results.append({
                 "locus": locus, "gene": gene, "cell_type": ct_name,
-                "subtype": subtype, "nsnps": 0,
+                "gwas": gwas_label, "nsnps": 0,
                 "PP.H0": None, "PP.H1": None, "PP.H2": None,
                 "PP.H3": None, "PP.H4": None,
                 "note": "no eQTL data for gene in this cell type",
@@ -297,7 +296,7 @@ def _coloc_one_locus(args):
         if len(merged) < 10:
             results.append({
                 "locus": locus, "gene": gene, "cell_type": ct_name,
-                "subtype": subtype, "nsnps": len(merged),
+                "gwas": gwas_label, "nsnps": len(merged),
                 "PP.H0": None, "PP.H1": None, "PP.H2": None,
                 "PP.H3": None, "PP.H4": None,
                 "note": f"<10 shared SNPs ({len(merged)})",
@@ -313,7 +312,7 @@ def _coloc_one_locus(args):
         if len(merged) < 10:
             results.append({
                 "locus": locus, "gene": gene, "cell_type": ct_name,
-                "subtype": subtype, "nsnps": len(merged),
+                "gwas": gwas_label, "nsnps": len(merged),
                 "PP.H0": None, "PP.H1": None, "PP.H2": None,
                 "PP.H3": None, "PP.H4": None,
                 "note": f"<10 valid SNPs after SE filter ({len(merged)})",
@@ -330,7 +329,7 @@ def _coloc_one_locus(args):
         pp["locus"] = locus
         pp["gene"] = gene
         pp["cell_type"] = ct_name
-        pp["subtype"] = subtype
+        pp["gwas"] = gwas_label
         pp["note"] = ""
         results.append(pp)
 
@@ -355,26 +354,24 @@ def main():
         if not (GWAS_DIR / fname).exists():
             missing.append(f"  {subtype}: {GWAS_DIR / fname}")
 
-    if missing:
+    if len(missing) == len(GWAS_SUBTYPE_FILES):
         log.info("=" * 72)
-        log.info("GWAS summary statistics not found — skipping colocalization")
+        log.info("No GWAS summary statistics found — skipping colocalization")
         log.info("=" * 72)
-        log.info("")
-        log.info("Missing files:")
-        for m in missing:
-            log.info(m)
         log.info("")
         log.info("Create symlinks in data/gwas/ to your meta-analysis files:")
         log.info("  cd data/gwas")
         for subtype, fname in GWAS_SUBTYPE_FILES.items():
             log.info(f"  ln -s /path/to/{fname} {fname}")
         log.info("")
-        log.info("The pipeline continues without colocalization.")
-
         stub = pd.DataFrame(columns=["locus", "gene", "cell_type",
-                                      "PP.H4", "note"])
+                                      "gwas", "PP.H4", "note"])
         stub.to_csv(OUTPUT_DIR / "coloc_results.csv", index=False)
         return
+    elif missing:
+        log.info("  Missing (will skip these GWAS):")
+        for m in missing:
+            log.info(m)
 
     log.info("=" * 72)
     log.info("Colocalization analysis (coloc.abf)")
@@ -405,7 +402,12 @@ def main():
         log.info("  GWAS is hg38 — no liftover needed")
 
     # Run per-locus in parallel
-    tasks = [(locus, rsid_to_pos, pos_to_rsid, liftover) for locus in GWAS_LOCI]
+    # Run every locus against every GWAS subtype
+    tasks = []
+    for locus in GWAS_LOCI:
+        for gwas_label in GWAS_SUBTYPE_FILES:
+            tasks.append((locus, gwas_label, rsid_to_pos, pos_to_rsid, liftover))
+    log.info(f"  {len(tasks)} tasks: {len(GWAS_LOCI)} loci x {len(GWAS_SUBTYPE_FILES)} GWAS")
     all_results = []
     with ProcessPoolExecutor(max_workers=ncpus) as pool:
         futures = {pool.submit(_coloc_one_locus, t): t[0] for t in tasks}
@@ -418,7 +420,7 @@ def main():
                 continue
             for r in rows:
                 if "_skip" in r:
-                    log.info(f"  [{locus}] skipped: {r['_skip']}")
+                    log.info(f"  [{locus}/{r.get('gwas','?')}] skipped: {r['_skip']}")
                 else:
                     all_results.append(r)
 
@@ -430,8 +432,8 @@ def main():
     # Summary: best PP.H4 per locus
     if "PP.H4" in coloc_df.columns and coloc_df["PP.H4"].notna().any():
         valid = coloc_df.dropna(subset=["PP.H4"])
-        idx = valid.groupby("locus")["PP.H4"].idxmax()
-        summary = valid.loc[idx, ["locus", "gene", "cell_type", "subtype",
+        idx = valid.groupby(["locus", "gwas"])["PP.H4"].idxmax()
+        summary = valid.loc[idx, ["locus", "gene", "cell_type", "gwas",
                                    "nsnps", "PP.H4"]].copy()
         summary["colocalized"] = summary["PP.H4"] >= COLOC_PP4
         summary = summary.sort_values("PP.H4", ascending=False)

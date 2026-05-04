@@ -97,8 +97,11 @@ RANKING_CELL_TYPES = list(BRYOIS_CT_PREFIX.keys())
 GWAS_BUILD = "hg19"    # set to "hg38" if your GWAS is already on hg38
 
 GWAS_SUBTYPE_FILES = {
-    "IDH-mut": "IDHmut_meta_summary_stats.tsv",
-    "IDH-wt":  "IDHwt_meta_summary_stats.tsv",
+    "all_glioma":    "all_glioma_meta_summary_stats.tsv",
+    "IDH-mut":       "IDHmut_meta_summary_stats.tsv",
+    "IDH-wt":        "IDHwt_meta_summary_stats.tsv",
+    "IDHmut_codel":  "IDHmut_1p19q_codel_meta_summary_stats.tsv",
+    "IDHmut_intact": "IDHmut_1p19q_intact_meta_summary_stats.tsv",
 }
 
 # Column name mapping: your GWAS format -> pipeline internal names
