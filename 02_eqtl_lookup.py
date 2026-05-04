@@ -505,10 +505,14 @@ def main():
                         help="Worker processes (0 = auto-detect)")
     args = parser.parse_args()
 
-    ncpus = args.cpus if args.cpus > 0 else (
-        len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity')
-        else os.cpu_count() or 4
-    )
+    if args.cpus > 0:
+        ncpus = args.cpus
+    elif os.environ.get("SLURM_CPUS_PER_TASK"):
+        ncpus = int(os.environ["SLURM_CPUS_PER_TASK"])
+    elif hasattr(os, 'sched_getaffinity'):
+        ncpus = len(os.sched_getaffinity(0))
+    else:
+        ncpus = os.cpu_count() or 4
     log.info(f"CPUs available: {ncpus}")
 
     eqtl_df = extract_eqtl_parallel(ncpus)

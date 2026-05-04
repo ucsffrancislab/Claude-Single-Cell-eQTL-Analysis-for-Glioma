@@ -177,28 +177,47 @@ bash run_pipeline.sh [OPTIONS]
 
 | Option | Effect |
 |--------|--------|
+| `--work-dir DIR` | Data/output directory (default: current directory) |
 | `--cpus N` | Force N worker processes (default: auto-detect via `nproc`) |
 | `--skip-download` | Skip step 0 (data already cached) |
 | `--skip-census` | Skip step 1 (no internet, or expression CSV already exists) |
 | `--skip-coloc` | Skip step 3 (no GWAS summary stats) |
 
+The pipeline finds scripts via `SCEQTL_PIPELINE_DIR` (auto-detected from
+`run_pipeline.sh` location) and reads/writes data in `SCEQTL_WORK_DIR`
+(set by `--work-dir` or defaults to the current directory).
+
 ### Typical cluster workflow
 
+The pipeline separates **script location** (git repo) from **working directory**
+(data + output).  Set `--work-dir` or `cd` into your working directory first.
+
 ```bash
-# On login node (has internet):
-cd /path/to/pipeline
-bash 00_download_bryois.sh
+# Script repo (read-only, version-controlled):
+SCRIPTS=~/github/ucsffrancislab/Claude-Single-Cell-eQTL-Analysis-for-Glioma
 
-# Option A: run expression profiling on login node (if tiledbsoma works)
-python3 01_expression_profiling.py
+# Working directory (data + output):
+WORKDIR=/path/to/your/working/directory
+cd "${WORKDIR}"
 
-# Option B: run on laptop instead (if login node lacks AVX2 or S3 access)
-#   On laptop:  python3 01_laptop_query.py
-#   Then:       scp output/celltype_expression.csv you@cluster:.../pipeline/output/
+# One-time setup: download Bryois data (login node, has internet)
+bash "${SCRIPTS}/00_download_bryois.sh"
+
+# One-time setup: place expression CSV in output/
+mkdir -p output
+cp "${SCRIPTS}/celltype_expression.csv" output/
+
+# One-time setup: symlink GWAS summary stats
+mkdir -p data/gwas
+ln -s /path/to/all_glioma_meta_summary_stats.tsv data/gwas/
+ln -s /path/to/IDHmut_meta_summary_stats.tsv data/gwas/
+ln -s /path/to/IDHwt_meta_summary_stats.tsv data/gwas/
+ln -s /path/to/IDHmut_1p19q_codel_meta_summary_stats.tsv data/gwas/
+ln -s /path/to/IDHmut_1p19q_intact_meta_summary_stats.tsv data/gwas/
 
 # Submit compute job:
 sbatch --cpus-per-task=16 --mem=16G --time=1:00:00 \
-  /path/to/pipeline/run_pipeline.sh --skip-download --skip-census --cpus 16
+  "${SCRIPTS}/run_pipeline.sh" --skip-download --skip-census --cpus 16
 ```
 
 ## Resource requirements

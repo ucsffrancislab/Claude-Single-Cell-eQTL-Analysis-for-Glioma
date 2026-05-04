@@ -36,6 +36,9 @@ elif [[ -z "${SCEQTL_WORK_DIR:-}" ]]; then
 fi
 cd "${SCEQTL_WORK_DIR}"
 
+# Ensure Python can find config.py and other pipeline modules in SCRIPT_DIR
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
 # ---------- Parse arguments ----------
 CPUS=0
 SKIP_DOWNLOAD=false
@@ -63,7 +66,8 @@ done
 
 # ---------- CPU detection ----------
 if [[ "${CPUS}" -eq 0 ]]; then
-    CPUS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    # SLURM-aware: use allocated CPUs, not total node CPUs
+    CPUS=${SLURM_CPUS_PER_TASK:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || 4)}
 fi
 echo "============================================================"
 echo " Glioma Single-Cell eQTL Pipeline"
@@ -110,7 +114,7 @@ if [[ "${SKIP_DOWNLOAD}" == "true" ]]; then
     echo "=== Step 0: Download (SKIPPED) ==="
 else
     echo "=== Step 0: Download Bryois data ==="
-    bash 00_download_bryois.sh "${CPUS}"
+    bash "${SCRIPT_DIR}/00_download_bryois.sh" "${CPUS}"
 fi
 echo "  Step 0: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
@@ -121,7 +125,7 @@ if [[ "${SKIP_CENSUS}" == "true" ]]; then
     echo "=== Step 1: Expression profiling (SKIPPED) ==="
 else
     echo "=== Step 1: Expression profiling (CELLxGENE Census) ==="
-    python3 01_expression_profiling.py
+    python3 "${SCRIPT_DIR}/01_expression_profiling.py"
 fi
 echo "  Step 1: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
@@ -129,7 +133,7 @@ echo ""
 # ---------- Step 2: eQTL lookup ----------
 STEP_START=$(date +%s)
 echo "=== Step 2: Parallel eQTL lookup ==="
-python3 02_eqtl_lookup.py --cpus "${CPUS}"
+python3 "${SCRIPT_DIR}/02_eqtl_lookup.py" --cpus "${CPUS}"
 echo "  Step 2: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
@@ -139,7 +143,7 @@ if [[ "${SKIP_COLOC}" == "true" ]]; then
     echo "=== Step 3: Colocalization (SKIPPED) ==="
 else
     echo "=== Step 3: Colocalization ==="
-    python3 03_colocalization.py --cpus "${CPUS}"
+    python3 "${SCRIPT_DIR}/03_colocalization.py" --cpus "${CPUS}"
 fi
 echo "  Step 3: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
@@ -147,14 +151,14 @@ echo ""
 # ---------- Step 4: Visualization ----------
 STEP_START=$(date +%s)
 echo "=== Step 4: Visualization ==="
-python3 04_visualization.py
+python3 "${SCRIPT_DIR}/04_visualization.py"
 echo "  Step 4: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
 # ---------- Step 5: Compile ----------
 STEP_START=$(date +%s)
 echo "=== Step 5: Compile results & interpretation ==="
-python3 05_compile_results.py
+python3 "${SCRIPT_DIR}/05_compile_results.py"
 echo "  Step 5: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
