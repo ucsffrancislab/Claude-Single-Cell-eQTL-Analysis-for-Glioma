@@ -1,0 +1,14 @@
+# Glioma single-cell eQTL pipeline — Python dependencies
+#
+# Core (required for steps 02-05)
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+matplotlib>=3.7
+statsmodels>=0.14
+requests>=2.28
+
+# CELLxGENE Census (required for step 01 only)
+# Skip if running with --skip-census
+cellxgene-census>=1.15
+tiledbsoma>=1.9
