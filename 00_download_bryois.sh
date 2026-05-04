@@ -19,7 +19,9 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-DATA_DIR="${SCRIPT_DIR}/data/bryois"
+# Data goes in the work directory, not the script directory
+WORK_DIR="${SCEQTL_WORK_DIR:-$(pwd)}"
+DATA_DIR="${WORK_DIR}/data/bryois"
 mkdir -p "${DATA_DIR}"
 
 # ---------- CPU detection ----------

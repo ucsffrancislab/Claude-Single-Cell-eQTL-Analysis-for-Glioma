@@ -10,15 +10,26 @@ import os
 from pathlib import Path
 
 # =============================================================================
-# PATHS  (all relative to PIPELINE_DIR so the pipeline is relocatable)
+# PATHS
 # =============================================================================
+# PIPELINE_DIR = where the scripts live (git repo)
+# WORK_DIR     = where data and output go (set via SCEQTL_WORK_DIR or cwd)
+#
+# Typical usage:
+#   cd /path/to/working/directory
+#   bash ~/github/.../run_pipeline.sh --skip-census --cpus 16
+#
+# The scripts find themselves via PIPELINE_DIR.  All data I/O goes to WORK_DIR.
 
 PIPELINE_DIR = Path(os.environ.get("SCEQTL_PIPELINE_DIR",
                                     Path(__file__).resolve().parent))
-DATA_DIR     = PIPELINE_DIR / "data"
+WORK_DIR     = Path(os.environ.get("SCEQTL_WORK_DIR",
+                                    os.getcwd()))
+
+DATA_DIR     = WORK_DIR / "data"
 BRYOIS_DIR   = DATA_DIR / "bryois"
-GWAS_DIR     = DATA_DIR / "gwas"            # user-supplied GWAS summary stats
-OUTPUT_DIR   = PIPELINE_DIR / "output"
+GWAS_DIR     = DATA_DIR / "gwas"
+OUTPUT_DIR   = WORK_DIR / "output"
 
 for d in (DATA_DIR, BRYOIS_DIR, GWAS_DIR, OUTPUT_DIR):
     d.mkdir(parents=True, exist_ok=True)
@@ -66,6 +77,42 @@ BRYOIS_ALL_PREFIX = {**BRYOIS_CT_PREFIX, **BRYOIS_PSEUDO_PREFIX}
 # Cell types that participate in "best cell type" ranking
 # (Pseudobulk is a tissue-level aggregate, NOT a cell type)
 RANKING_CELL_TYPES = list(BRYOIS_CT_PREFIX.keys())
+
+# =============================================================================
+# GWAS SUMMARY STATISTICS
+# =============================================================================
+# Subtype-matched GWAS files in data/gwas/.
+# Symlink or copy your meta-analysis summary stats there.
+#
+# Expected: one file per subtype, in the original meta-analysis format:
+#   CHR  BP  SNP  A1  A2  A1_FREQ  BETA  SE  P  OR  ...
+#
+# The pipeline reads these columns and matches to Bryois eQTL data by
+# genomic position (chr + bp), since GWAS SNP IDs (chr:pos:a1:a2) differ
+# from Bryois rsIDs.
+#
+# GENOME BUILD: Bryois SNP positions are hg38.  If your GWAS is on hg19/GRCh37,
+# the colocalization script lifts over coordinates automatically using pyliftover.
+
+GWAS_BUILD = "hg19"    # set to "hg38" if your GWAS is already on hg38
+
+GWAS_SUBTYPE_FILES = {
+    "IDH-mut": "IDHmut_meta_summary_stats.tsv",
+    "IDH-wt":  "IDHwt_meta_summary_stats.tsv",
+}
+
+# Column name mapping: your GWAS format -> pipeline internal names
+GWAS_COLUMN_MAP = {
+    "SNP":     "snp_id",
+    "CHR":     "chr",
+    "BP":      "pos",
+    "BETA":    "beta",
+    "SE":      "se",
+    "P":       "pvalue",
+    "A1_FREQ": "eaf",
+    "A1":      "effect_allele",
+    "A2":      "other_allele",
+}
 
 # =============================================================================
 # CELLxGENE EXPRESSION CELL TYPES  (superset, includes types not in Bryois)

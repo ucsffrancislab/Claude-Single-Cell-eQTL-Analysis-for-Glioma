@@ -26,8 +26,15 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-cd "${SCRIPT_DIR}"
 export SCEQTL_PIPELINE_DIR="${SCRIPT_DIR}"
+
+# Work directory: --work-dir, or SCEQTL_WORK_DIR, or current directory
+if [[ -n "${WORK_DIR}" ]]; then
+    export SCEQTL_WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
+elif [[ -z "${SCEQTL_WORK_DIR:-}" ]]; then
+    export SCEQTL_WORK_DIR="$(pwd)"
+fi
+cd "${SCEQTL_WORK_DIR}"
 
 # ---------- Parse arguments ----------
 CPUS=0
@@ -35,14 +42,20 @@ SKIP_DOWNLOAD=false
 SKIP_CENSUS=false
 SKIP_COLOC=false
 
+WORK_DIR=""
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --cpus)        CPUS="$2"; shift 2 ;;
+        --cpus)          CPUS="$2"; shift 2 ;;
+        --work-dir)      WORK_DIR="$2"; shift 2 ;;
         --skip-download) SKIP_DOWNLOAD=true; shift ;;
         --skip-census)   SKIP_CENSUS=true; shift ;;
         --skip-coloc)    SKIP_COLOC=true; shift ;;
         -h|--help)
-            echo "Usage: bash run_pipeline.sh [--cpus N] [--skip-download] [--skip-census] [--skip-coloc]"
+            echo "Usage: bash run_pipeline.sh [--work-dir DIR] [--cpus N] [--skip-download] [--skip-census] [--skip-coloc]"
+            echo ""
+            echo "  --work-dir DIR   Data/output directory (default: current directory)"
+            echo "  --cpus N         Worker processes (default: auto-detect)"
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -56,7 +69,8 @@ echo "============================================================"
 echo " Glioma Single-Cell eQTL Pipeline"
 echo " $(date)"
 echo " CPUs: ${CPUS}"
-echo " Pipeline dir: ${SCRIPT_DIR}"
+echo " Scripts:      ${SCRIPT_DIR}
+ Work dir:     ${SCEQTL_WORK_DIR}"
 echo "============================================================"
 echo ""
 
@@ -149,9 +163,9 @@ echo "============================================================"
 echo " Pipeline complete!"
 echo " $(date)"
 echo ""
-echo " Outputs in: ${SCRIPT_DIR}/output/"
+echo " Outputs in: ${SCEQTL_WORK_DIR}/output/"
 echo ""
-ls -lh output/*.csv output/*.png output/*.md output/*.log 2>/dev/null || true
+ls -lh "${SCEQTL_WORK_DIR}"/output/*.csv "${SCEQTL_WORK_DIR}"/output/*.png "${SCEQTL_WORK_DIR}"/output/*.md "${SCEQTL_WORK_DIR}"/output/*.log 2>/dev/null || true
 echo ""
 echo " Start with: output/interpretation.md"
 echo "============================================================"

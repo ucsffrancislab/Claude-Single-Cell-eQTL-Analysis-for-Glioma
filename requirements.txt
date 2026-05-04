@@ -7,8 +7,9 @@ scipy>=1.10
 matplotlib>=3.7
 statsmodels>=0.14
 requests>=2.28
+pyliftover>=0.4
 
-# CELLxGENE Census (required for step 01 only)
+# CELLxGENE Census (required for step 01 only — see README for caveats)
 # Skip if running with --skip-census
-cellxgene-census>=1.15
-tiledbsoma>=1.9
+# cellxgene-census>=1.15
+# tiledbsoma>=1.9
