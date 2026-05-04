@@ -65,9 +65,30 @@ python3 01_expression_profiling.py
 ```
 
 Queries CZ CELLxGENE Census for per-cell-type expression of all 14 GWAS genes
-across 8 brain cell types (~1.3M cells from Allen Brain Cell Atlas DLPFC).
+across 8 brain cell types from normal human brain tissue.
 
 **Requires internet** (S3 access).  ~8 GB RAM, 5–15 minutes.
+
+#### Known issue: CELLxGENE Census query
+
+Both `01_expression_profiling.py` and `01_laptop_query.py` have practical
+problems with the current Census version (2025-11-08):
+
+1. **`tiledbsoma` requires AVX2** CPU instructions and direct S3 access —
+   often unavailable on cluster login/compute nodes.
+2. **The original dataset ID** (`6f7fd0f1-...`, Allen Brain Cell Atlas DLPFC)
+   **no longer exists** in Census 2025-11-08.
+3. **Falling back to `tissue_general == 'brain'`** matches the entire Census
+   brain corpus (tens of millions of cells), making the query impractically
+   slow (~2+ hours, >14 GB RAM) even on a local machine.
+
+**Recommended: use the pre-generated HPA expression CSV** provided with this
+pipeline (`celltype_expression.csv`).  It contains mean expression (nCPM) from
+Human Protein Atlas v24 single-nuclei brain RNA-seq for all 14 genes × 8 cell
+types.  Place it in `output/` and run with `--skip-census`.
+
+A future fix would narrow the Census query to a specific tissue (e.g.,
+`tissue == 'cerebral cortex'`) or identify the correct replacement dataset ID.
 
 ### Step 2 — eQTL lookup (parallelised)
 
@@ -167,9 +188,15 @@ bash run_pipeline.sh [OPTIONS]
 # On login node (has internet):
 cd /path/to/pipeline
 bash 00_download_bryois.sh
+
+# Option A: run expression profiling on login node (if tiledbsoma works)
 python3 01_expression_profiling.py
 
-# Submit compute job (no venv needed — uses system/module Python):
+# Option B: run on laptop instead (if login node lacks AVX2 or S3 access)
+#   On laptop:  python3 01_laptop_query.py
+#   Then:       scp output/celltype_expression.csv you@cluster:.../pipeline/output/
+
+# Submit compute job:
 sbatch --cpus-per-task=16 --mem=16G --time=1:00:00 \
   /path/to/pipeline/run_pipeline.sh --skip-download --skip-census --cpus 16
 ```
@@ -241,7 +268,8 @@ column in the summary table.
 pipeline/
 ├── config.py                  # Shared configuration (single source of truth)
 ├── 00_download_bryois.sh      # Parallel data download
-├── 01_expression_profiling.py # CELLxGENE Census query
+├── 01_expression_profiling.py # CELLxGENE Census query (cluster)
+├── 01_laptop_query.py         # CELLxGENE Census query (laptop workaround)
 ├── 02_eqtl_lookup.py          # Parallel eQTL extraction + BH correction
 ├── 03_colocalization.py       # coloc.abf (optional, needs GWAS data)
 ├── 04_visualization.py        # Publication-ready figures
