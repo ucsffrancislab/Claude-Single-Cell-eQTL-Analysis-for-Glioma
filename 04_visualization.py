@@ -71,7 +71,7 @@ def plot_expression_dotplot():
         (axes[0], mut_genes, "IDH-mutant risk loci",   "Reds"),
         (axes[1], wt_genes,  "IDH-wildtype risk loci", "Blues"),
     ]:
-        cmap = cm.get_cmap(cmap_name)
+        cmap = matplotlib.colormaps[cmap_name]
         for i, gene in enumerate(genes):
             for j, ct in enumerate(EXPRESSION_CELL_TYPES):
                 row = expr_df[(expr_df["gene"] == gene) &
@@ -80,7 +80,13 @@ def plot_expression_dotplot():
                     continue
                 pct = row["pct_expressing"].iloc[0]
                 me  = row["mean_expression"].iloc[0]
-                size = max(pct * 4, 5)
+                if pd.notna(pct):
+                    size = max(pct * 4, 5)
+                elif pd.notna(me):
+                    # HPA data: no pct_expressing, use mean_expression for size
+                    size = max(me * 0.3, 5)
+                else:
+                    continue
                 ax.scatter(j, len(genes) - 1 - i, s=size,
                            c=[cmap(norm(me))],
                            edgecolors="gray", linewidths=0.5, zorder=3)
