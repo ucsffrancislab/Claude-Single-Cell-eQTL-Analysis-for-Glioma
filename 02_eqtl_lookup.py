@@ -207,13 +207,31 @@ def lookup_gwas_lead_snps():
         return {}
 
     import gzip
+    # snp_pos.txt.gz from Bryois (Zenodo 7276971) has columns:
+    #   SNP  SNP_id_hg38  SNP_id_hg19  effect_allele  other_allele  MAF
+    # where SNP_id_hg38/hg19 are in "chr1:234313" format.
+    # We extract BOTH builds so downstream code can match GWAS (hg19)
+    # without liftover — avoiding the small position losses liftover introduces.
+
     rsid_to_hg38 = {}
+    rsid_to_hg19 = {}
+
     with gzip.open(snp_pos_path, "rt") as f:
         header = f.readline().strip()
-        # Auto-detect delimiter and column layout
         sep = "\t" if "\t" in header else " "
         cols = header.split(sep)
         log.info(f"  snp_pos.txt.gz columns: {cols}")
+
+        # Identify which columns hold hg38 and hg19 positions
+        hg38_col = None
+        hg19_col = None
+        for idx, c in enumerate(cols):
+            cl = c.lower()
+            if "hg38" in cl:
+                hg38_col = idx
+            elif "hg19" in cl:
+                hg19_col = idx
+        log.info(f"  hg38 column index: {hg38_col}, hg19 column index: {hg19_col}")
 
         for line in f:
             parts = line.strip().split(sep)
@@ -221,68 +239,78 @@ def lookup_gwas_lead_snps():
                 continue
             rsid = parts[0]
 
-            # Try to find chr and pos from remaining columns
-            chrom, pos = None, None
-            for p in parts[1:]:
-                # Handle "chr1:234313" format
-                if ":" in p and p.replace("chr", "").split(":")[0].isdigit():
+            # Parse hg38
+            if hg38_col is not None and hg38_col < len(parts):
+                p = parts[hg38_col]
+                if ":" in p:
                     cp = p.replace("chr", "").split(":")
-                    chrom, pos = cp[0], int(cp[1])
-                    break
-                # Handle separate chr and pos columns
-                if chrom is None and (p.startswith("chr") or p.isdigit()):
-                    if p.startswith("chr"):
-                        chrom = p.replace("chr", "")
-                    elif p.isdigit() and chrom is not None:
-                        pos = int(p)
-                        break
-                    elif p.isdigit() and len(p) <= 2:
-                        chrom = p
-                    elif p.isdigit() and len(p) > 2:
-                        pos = int(p)
+                    if cp[0].isdigit():
+                        rsid_to_hg38[rsid] = (cp[0], int(cp[1]))
+
+            # Parse hg19
+            if hg19_col is not None and hg19_col < len(parts):
+                p = parts[hg19_col]
+                if ":" in p:
+                    cp = p.replace("chr", "").split(":")
+                    if cp[0].isdigit():
+                        rsid_to_hg19[rsid] = (cp[0], int(cp[1]))
+
+            # Fallback: if no labelled columns, use first chr:pos found as hg38
+            if rsid not in rsid_to_hg38:
+                for p in parts[1:]:
+                    if ":" in p and p.replace("chr", "").split(":")[0].isdigit():
+                        cp = p.replace("chr", "").split(":")
+                        rsid_to_hg38[rsid] = (cp[0], int(cp[1]))
                         break
 
-            if chrom and pos:
-                rsid_to_hg38[rsid] = (chrom, pos)
+    log.info(f"  {len(rsid_to_hg38):,} hg38 + {len(rsid_to_hg19):,} hg19 positions loaded")
 
-    # Set up liftover if needed
-    liftover = None
-    if GWAS_BUILD != "hg38":
-        try:
-            from pyliftover import LiftOver
-            liftover = LiftOver("hg38", GWAS_BUILD)
-            log.info(f"  Liftover: hg38 -> {GWAS_BUILD}")
-        except ImportError:
-            log.warning("  pyliftover not installed — cannot match positions")
-            return {}
+    # Use the native hg19 positions from snp_pos.txt.gz to match GWAS data.
+    # This avoids liftover entirely — no small position losses from chain files.
+    #
+    # NOTE: pyliftover code preserved below (commented out) in case a future
+    # dataset lacks native hg19 positions in its SNP reference file.
+    #
+    # --- Liftover approach (commented out — snp_pos.txt.gz has both builds) ---
+    # liftover = None
+    # if GWAS_BUILD != "hg38":
+    #     try:
+    #         from pyliftover import LiftOver
+    #         liftover = LiftOver("hg38", GWAS_BUILD)
+    #         log.info(f"  Liftover: hg38 -> {GWAS_BUILD}")
+    #     except ImportError:
+    #         log.warning("  pyliftover not installed — cannot match positions")
+    #         return {}
+    # --- End liftover ---
+
+    # Choose the position dict matching the GWAS build
+    if GWAS_BUILD == "hg19" and rsid_to_hg19:
+        gwas_pos_lookup = rsid_to_hg19
+        log.info(f"  Using native hg19 positions for GWAS matching (no liftover)")
+    elif GWAS_BUILD == "hg38":
+        gwas_pos_lookup = rsid_to_hg38
+        log.info(f"  GWAS is hg38 — using hg38 positions directly")
+    else:
+        log.warning(f"  No {GWAS_BUILD} positions available — falling back to hg38")
+        gwas_pos_lookup = rsid_to_hg38
 
     # For each lead SNP, get its position in the GWAS build
-    lead_snp_positions = {}  # {locus: (chr, hg19_pos)}
+    lead_snp_positions = {}  # {locus: (chr, gwas_build_pos)}
     for locus, cfg in GWAS_LOCI.items():
         rsid = cfg["rsid"]
-        hg38 = rsid_to_hg38.get(rsid)
-        if hg38 is None:
+        pos_info = gwas_pos_lookup.get(rsid)
+        if pos_info is None:
             # Try proxies
             for px_id, _ in cfg.get("proxies", []):
-                hg38 = rsid_to_hg38.get(px_id)
-                if hg38:
+                pos_info = gwas_pos_lookup.get(px_id)
+                if pos_info:
                     rsid = px_id
                     break
-        if hg38 is None:
+        if pos_info is None:
             log.info(f"  [{locus}] lead SNP position unknown — skipped")
             continue
 
-        chrom, pos38 = hg38
-        if liftover:
-            result = liftover.convert_coordinate(f"chr{chrom}", pos38)
-            if result and len(result) > 0:
-                pos_gwas = int(result[0][1])
-            else:
-                log.info(f"  [{locus}] liftover failed for {rsid} — skipped")
-                continue
-        else:
-            pos_gwas = pos38
-
+        chrom, pos_gwas = pos_info
         lead_snp_positions[locus] = (str(chrom), pos_gwas, rsid)
 
     log.info(f"  {len(lead_snp_positions)}/{len(GWAS_LOCI)} lead SNP positions resolved")

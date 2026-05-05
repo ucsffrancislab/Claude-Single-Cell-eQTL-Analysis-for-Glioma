@@ -108,42 +108,61 @@ def _get_snp_positions():
     path = BRYOIS_DIR / "snp_pos.txt.gz"
     if not path.exists():
         return {}, {}
-    rsid_to_pos = {}
-    pos_to_rsid = {}
+    # snp_pos.txt.gz from Bryois (Zenodo 7276971) has columns:
+    #   SNP  SNP_id_hg38  SNP_id_hg19  effect_allele  other_allele  MAF
+    # We extract both builds so GWAS matching uses native hg19 positions
+    # without liftover — avoiding small position losses from chain files.
+
+    rsid_to_hg38 = {}
+    rsid_to_hg19 = {}
+    pos_hg38_to_rsid = {}
 
     with gzip.open(path, "rt") as f:
         header = f.readline().strip()
         sep = "\t" if "\t" in header else " "
+        cols = header.split(sep)
+
+        hg38_col = None
+        hg19_col = None
+        for idx, c in enumerate(cols):
+            cl = c.lower()
+            if "hg38" in cl:
+                hg38_col = idx
+            elif "hg19" in cl:
+                hg19_col = idx
 
         for line in f:
             parts = line.strip().split(sep)
             if len(parts) < 2:
                 continue
             rsid = parts[0]
-            chrom, pos = None, None
-            for p in parts[1:]:
-                if ":" in p and p.replace("chr", "").split(":")[0].isdigit():
-                    cp = p.replace("chr", "").split(":")
-                    chrom, pos = cp[0], int(cp[1])
-                    break
-                if chrom is None and (p.startswith("chr") or p.isdigit()):
-                    if p.startswith("chr"):
-                        chrom = p.replace("chr", "")
-                    elif p.isdigit() and chrom is not None:
-                        pos = int(p)
-                        break
-                    elif p.isdigit() and len(p) <= 2:
-                        chrom = p
-                    elif p.isdigit() and len(p) > 2:
-                        pos = int(p)
-                        break
-            if chrom and pos:
-                rsid_to_pos[rsid] = (chrom, pos)
-                key = (chrom, pos)
-                if key not in pos_to_rsid:
-                    pos_to_rsid[key] = rsid
 
-    return rsid_to_pos, pos_to_rsid
+            if hg38_col is not None and hg38_col < len(parts):
+                p = parts[hg38_col]
+                if ":" in p:
+                    cp = p.replace("chr", "").split(":")
+                    if cp[0].isdigit():
+                        rsid_to_hg38[rsid] = (cp[0], int(cp[1]))
+                        key = (cp[0], int(cp[1]))
+                        if key not in pos_hg38_to_rsid:
+                            pos_hg38_to_rsid[key] = rsid
+
+            if hg19_col is not None and hg19_col < len(parts):
+                p = parts[hg19_col]
+                if ":" in p:
+                    cp = p.replace("chr", "").split(":")
+                    if cp[0].isdigit():
+                        rsid_to_hg19[rsid] = (cp[0], int(cp[1]))
+
+            # Fallback: if no labelled columns, first chr:pos -> hg38
+            if rsid not in rsid_to_hg38:
+                for p in parts[1:]:
+                    if ":" in p and p.replace("chr", "").split(":")[0].isdigit():
+                        cp = p.replace("chr", "").split(":")
+                        rsid_to_hg38[rsid] = (cp[0], int(cp[1]))
+                        break
+
+    return rsid_to_hg38, rsid_to_hg19, pos_hg38_to_rsid
 
 
 def load_gwas_region(subtype, chrom, pos_center, window=500_000):
@@ -222,17 +241,17 @@ def load_bryois_region(ct_prefix, chrom, gene_symbol, positions_in_region):
 
 def _coloc_one_locus(args):
     """Run coloc for one locus × one GWAS across all ranking cell types."""
-    locus, gwas_label, rsid_to_pos, pos_to_rsid, liftover = args
+    locus, gwas_label, rsid_to_hg38, gwas_pos_lookup, liftover = args
     cfg = GWAS_LOCI[locus]
     chrom = cfg["chr"]
     gene = locus
 
     # Get genomic position of lead SNP (or proxy)
     lead_snp = cfg["rsid"]
-    pos_info = rsid_to_pos.get(lead_snp)
+    pos_info = gwas_pos_lookup.get(lead_snp)
     if pos_info is None:
         for px_id, _ in cfg.get("proxies", []):
-            pos_info = rsid_to_pos.get(px_id)
+            pos_info = gwas_pos_lookup.get(px_id)
             if pos_info:
                 break
     if pos_info is None:
@@ -242,43 +261,33 @@ def _coloc_one_locus(args):
     pos_center = int(pos_center)
 
     # Convert lead SNP hg38 position to GWAS build for region query
+    # pos_center is already in GWAS build coordinates (from gwas_pos_lookup)
+    # No liftover needed.
     gwas_center = pos_center
-    if liftover is not None:
-        result = liftover.convert_coordinate(f"chr{chrom}", pos_center)
-        if result and len(result) > 0:
-            # convert_coordinate returns list of (chr, pos, strand, score)
-            # but this is hg38->hg38 direction... we need hg38->hg19
-            pass
-        # Actually we need the reverse: hg38 center -> hg19 for GWAS query
-        # Use a reverse liftover
-        try:
-            from pyliftover import LiftOver
-            reverse_lo = LiftOver('hg38', GWAS_BUILD)
-            rev_result = reverse_lo.convert_coordinate(f"chr{chrom}", pos_center)
-            if rev_result and len(rev_result) > 0:
-                gwas_center = int(rev_result[0][1])
-        except Exception:
-            gwas_center = pos_center  # fallback: positions usually close
 
     # Load subtype-matched GWAS region (in GWAS build coordinates)
     gwas = load_gwas_region(gwas_label, chrom, gwas_center)
     if gwas is None or gwas.empty:
         return [{"locus": locus, "gwas": gwas_label, "_skip": f"no GWAS data for {gwas_label} at chr{chrom}:{gwas_center}"}]
 
-    # Liftover GWAS positions to hg38 for matching with Bryois
-    if liftover is not None:
-        hg38_positions = []
-        for _, row in gwas.iterrows():
-            result = liftover.convert_coordinate(f"chr{row['chr']}", int(row['pos']))
-            if result and len(result) > 0:
-                hg38_positions.append(int(result[0][1]))
-            else:
-                hg38_positions.append(None)
-        gwas["pos_hg38"] = hg38_positions
-        gwas = gwas.dropna(subset=["pos_hg38"])
-        gwas["pos_hg38"] = gwas["pos_hg38"].astype(int)
-    else:
-        gwas["pos_hg38"] = gwas["pos"]
+    # Match GWAS to Bryois by GWAS-build positions.
+    # Both sides use the same build (hg19 from gwas_pos_lookup),
+    # so no liftover needed — just match on chr + pos directly.
+    #
+    # --- Liftover approach (commented out) ---
+    # if liftover is not None:
+    #     hg38_positions = []
+    #     for _, row in gwas.iterrows():
+    #         result = liftover.convert_coordinate(f"chr{row['chr']}", int(row['pos']))
+    #         if result and len(result) > 0:
+    #             hg38_positions.append(int(result[0][1]))
+    #         else:
+    #             hg38_positions.append(None)
+    #     gwas["pos_hg38"] = hg38_positions
+    #     gwas = gwas.dropna(subset=["pos_hg38"])
+    #     gwas["pos_hg38"] = gwas["pos_hg38"].astype(int)
+    # --- End liftover ---
+    gwas["pos_hg38"] = gwas["pos"]  # same build, no conversion
 
     results = []
     for ct_name, ct_prefix in BRYOIS_CT_PREFIX.items():
@@ -293,10 +302,10 @@ def _coloc_one_locus(args):
             })
             continue
 
-        # Map Bryois rsIDs to positions for merging with GWAS
+        # Map Bryois rsIDs to GWAS-build positions for merging
         eqtl_positions = []
         for rsid in eqtl["snp_id"]:
-            p = rsid_to_pos.get(rsid)
+            p = gwas_pos_lookup.get(rsid)
             if p:
                 eqtl_positions.append((str(p[0]), int(p[1])))
             else:
@@ -411,29 +420,42 @@ def main():
 
     # Load SNP positions for coordinate-based matching
     log.info("  Loading Bryois SNP positions (hg38)...")
-    rsid_to_pos, pos_to_rsid = _get_snp_positions()
-    log.info(f"  {len(rsid_to_pos):,} rsID->position mappings loaded")
+    rsid_to_hg38, rsid_to_hg19, pos_hg38_to_rsid = _get_snp_positions()
+    log.info(f"  {len(rsid_to_hg38):,} hg38 + {len(rsid_to_hg19):,} hg19 positions loaded")
 
     # Set up liftover if GWAS is on a different build
-    liftover = None
-    if GWAS_BUILD != "hg38":
-        try:
-            from pyliftover import LiftOver
-            liftover = LiftOver(GWAS_BUILD, 'hg38')
-            log.info(f"  Liftover: {GWAS_BUILD} -> hg38 (via pyliftover)")
-        except ImportError:
-            log.error("  pyliftover not installed! pip install pyliftover")
-            log.error("  Cannot match GWAS (hg19) to Bryois (hg38) without liftover.")
-            return
+    # Use native hg19 positions from snp_pos.txt.gz for GWAS matching.
+    # No liftover needed — avoids small position losses from chain files.
+    #
+    # --- Liftover approach (commented out — snp_pos.txt.gz has both builds) ---
+    # liftover = None
+    # if GWAS_BUILD != "hg38":
+    #     try:
+    #         from pyliftover import LiftOver
+    #         liftover = LiftOver(GWAS_BUILD, 'hg38')
+    #         log.info(f"  Liftover: {GWAS_BUILD} -> hg38 (via pyliftover)")
+    #     except ImportError:
+    #         log.error("  pyliftover not installed!")
+    #         return
+    # --- End liftover ---
+
+    if GWAS_BUILD == "hg19" and rsid_to_hg19:
+        gwas_pos_lookup = rsid_to_hg19
+        log.info(f"  Using native hg19 positions for GWAS matching (no liftover)")
+    elif GWAS_BUILD == "hg38":
+        gwas_pos_lookup = rsid_to_hg38
+        log.info(f"  GWAS is hg38 — using hg38 positions directly")
     else:
-        log.info("  GWAS is hg38 — no liftover needed")
+        log.warning(f"  No {GWAS_BUILD} positions — falling back to hg38")
+        gwas_pos_lookup = rsid_to_hg38
+    liftover = None  # kept for interface compatibility
 
     # Run per-locus in parallel
     # Run every locus against every GWAS subtype
     tasks = []
     for locus in GWAS_LOCI:
         for gwas_label in GWAS_SUBTYPE_FILES:
-            tasks.append((locus, gwas_label, rsid_to_pos, pos_to_rsid, liftover))
+            tasks.append((locus, gwas_label, rsid_to_hg38, gwas_pos_lookup, liftover))
     log.info(f"  {len(tasks)} tasks: {len(GWAS_LOCI)} loci x {len(GWAS_SUBTYPE_FILES)} GWAS")
     all_results = []
     with ProcessPoolExecutor(max_workers=ncpus) as pool:
