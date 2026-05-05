@@ -277,13 +277,16 @@ def plot_coloc_heatmap():
     locus_order = ([l for l in GWAS_LOCI if GWAS_LOCI[l]["subtype"] == "IDH-mut"]
                    + [l for l in GWAS_LOCI if GWAS_LOCI[l]["subtype"] == "IDH-wt"])
 
+    # Show the BEST PP.H4 across all GWAS subtypes for each (locus, cell_type)
     M = np.full((len(locus_order), len(cell_types)), np.nan)
     for i, locus in enumerate(locus_order):
         for j, ct in enumerate(cell_types):
             r = coloc_df[(coloc_df["locus"] == locus) &
                          (coloc_df["cell_type"] == ct)]
-            if len(r) and pd.notna(r["PP.H4"].iloc[0]):
-                M[i, j] = r["PP.H4"].iloc[0]
+            if len(r):
+                valid = r["PP.H4"].dropna()
+                if len(valid):
+                    M[i, j] = valid.max()
 
     fig, ax = plt.subplots(figsize=(9, 7))
     im = ax.imshow(M, aspect="auto", cmap="YlOrRd",

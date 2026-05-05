@@ -462,19 +462,57 @@ def correct_and_summarise(eqtl_df, gwas_effects=None):
 
     summary = pd.DataFrame(rows).sort_values(["subtype", "best_pvalue"])
 
-    # ── Risk allele direction ──
-    # Use auto-looked-up GWAS betas (subtype-matched, falling back to all_glioma)
-    def _get_matched_gwas_beta(locus):
+    # ── Risk allele direction (allele-harmonized) ──
+    # The Bryois eQTL beta is relative to the Bryois effect_allele.
+    # The GWAS beta is relative to GWAS A1.
+    # If these are different alleles (detectable by comparing MAF vs EAF),
+    # we flip the GWAS beta before comparing signs.
+    #
+    # Load Bryois allele info for harmonization
+    _bryois_alleles = {}
+    snp_pos_path = BRYOIS_DIR / "snp_pos.txt.gz"
+    if snp_pos_path.exists():
+        with gzip.open(snp_pos_path, "rt") as f:
+            hdr = f.readline().strip()
+            _sep = "\t" if "\t" in hdr else " "
+            for line in f:
+                parts = line.strip().split(_sep)
+                if len(parts) >= 6:
+                    _bryois_alleles[parts[0]] = float(parts[5])  # MAF
+
+    def _get_harmonized_gwas_beta(row):
+        locus = row["locus"]
+        snp = row.get("snp_used")
         effects = gwas_effects.get(locus, {})
         if not effects:
             return None
         subtype = GWAS_LOCI[locus]["subtype"]
         matched = effects.get(subtype) or effects.get("all_glioma")
-        if matched:
-            return matched["gwas_beta"]
-        return next(iter(effects.values()))["gwas_beta"]
+        if not matched:
+            matched = next(iter(effects.values()))
+        gwas_beta = matched["gwas_beta"]
+        gwas_eaf = matched["gwas_eaf"]
 
-    summary["gwas_beta"] = summary["locus"].map(_get_matched_gwas_beta)
+        # Check if alleles are flipped using frequency comparison
+        bryois_maf = _bryois_alleles.get(snp)
+        if bryois_maf is not None and not np.isnan(gwas_eaf):
+            diff_same = abs(gwas_eaf - bryois_maf)
+            diff_flip = abs(gwas_eaf - (1 - bryois_maf))
+            if diff_flip < diff_same and diff_flip < 0.10:
+                # Alleles are flipped — negate GWAS beta to harmonize
+                gwas_beta = -gwas_beta
+        return gwas_beta
+
+    summary["gwas_beta_harmonized"] = summary.apply(_get_harmonized_gwas_beta, axis=1)
+    # Keep original for reference
+    summary["gwas_beta_raw"] = summary["locus"].map(
+        lambda l: (gwas_effects.get(l, {}).get(GWAS_LOCI[l]["subtype"])
+                   or gwas_effects.get(l, {}).get("all_glioma")
+                   or {"gwas_beta": None})["gwas_beta"]
+        if l in gwas_effects else None
+    )
+    summary["gwas_beta"] = summary["gwas_beta_harmonized"]
+
     has_gwas = summary["gwas_beta"].notna() & summary["best_beta"].notna()
     summary["concordant_direction"] = np.where(
         has_gwas,
