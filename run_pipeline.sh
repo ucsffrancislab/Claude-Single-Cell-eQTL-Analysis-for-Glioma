@@ -46,23 +46,39 @@ SKIP_CENSUS=false
 SKIP_COLOC=false
 
 WORK_DIR=""
+VENV=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --cpus)          CPUS="$2"; shift 2 ;;
         --work-dir)      WORK_DIR="$2"; shift 2 ;;
+        --venv)          VENV="$2"; shift 2 ;;
         --skip-download) SKIP_DOWNLOAD=true; shift ;;
         --skip-census)   SKIP_CENSUS=true; shift ;;
         --skip-coloc)    SKIP_COLOC=true; shift ;;
         -h|--help)
-            echo "Usage: bash run_pipeline.sh [--work-dir DIR] [--cpus N] [--skip-download] [--skip-census] [--skip-coloc]"
+            echo "Usage: bash run_pipeline.sh [OPTIONS]"
             echo ""
             echo "  --work-dir DIR   Data/output directory (default: current directory)"
-            echo "  --cpus N         Worker processes (default: auto-detect)"
+            echo "  --venv DIR       Activate Python venv at DIR before running"
+            echo "  --cpus N         Worker processes (default: auto-detect from SLURM)"
+            echo "  --skip-download  Skip Bryois data download"
+            echo "  --skip-census    Skip CELLxGENE expression profiling"
+            echo "  --skip-coloc     Skip colocalization"
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# ---------- Activate venv ----------
+if [[ -n "${VENV}" ]]; then
+    if [[ -f "${VENV}/bin/activate" ]]; then
+        source "${VENV}/bin/activate"
+    else
+        echo "ERROR: venv not found at ${VENV}/bin/activate"
+        exit 1
+    fi
+fi
 
 # ---------- CPU detection ----------
 if [[ "${CPUS}" -eq 0 ]]; then
