@@ -209,11 +209,41 @@ def lookup_gwas_lead_snps():
     import gzip
     rsid_to_hg38 = {}
     with gzip.open(snp_pos_path, "rt") as f:
-        header = f.readline()
+        header = f.readline().strip()
+        # Auto-detect delimiter and column layout
+        sep = "\t" if "\t" in header else " "
+        cols = header.split(sep)
+        log.info(f"  snp_pos.txt.gz columns: {cols}")
+
         for line in f:
-            parts = line.strip().split("\t")
-            if len(parts) >= 3:
-                rsid_to_hg38[parts[0]] = (str(parts[1]).replace("chr", ""), int(parts[2]))
+            parts = line.strip().split(sep)
+            if len(parts) < 2:
+                continue
+            rsid = parts[0]
+
+            # Try to find chr and pos from remaining columns
+            chrom, pos = None, None
+            for p in parts[1:]:
+                # Handle "chr1:234313" format
+                if ":" in p and p.replace("chr", "").split(":")[0].isdigit():
+                    cp = p.replace("chr", "").split(":")
+                    chrom, pos = cp[0], int(cp[1])
+                    break
+                # Handle separate chr and pos columns
+                if chrom is None and (p.startswith("chr") or p.isdigit()):
+                    if p.startswith("chr"):
+                        chrom = p.replace("chr", "")
+                    elif p.isdigit() and chrom is not None:
+                        pos = int(p)
+                        break
+                    elif p.isdigit() and len(p) <= 2:
+                        chrom = p
+                    elif p.isdigit() and len(p) > 2:
+                        pos = int(p)
+                        break
+
+            if chrom and pos:
+                rsid_to_hg38[rsid] = (chrom, pos)
 
     # Set up liftover if needed
     liftover = None

@@ -108,18 +108,41 @@ def _get_snp_positions():
     path = BRYOIS_DIR / "snp_pos.txt.gz"
     if not path.exists():
         return {}, {}
-    df = pd.read_csv(path, sep="\t", compression="gzip",
-                     dtype={"chr": str, "pos": int, "snp": str})
     rsid_to_pos = {}
     pos_to_rsid = {}
-    for _, r in df.iterrows():
-        chrom = str(r["chr"]).replace("chr", "")
-        pos = int(r["pos"])
-        rsid_to_pos[r["snp"]] = (chrom, pos)
-        # Multiple rsIDs can map to same position; keep first
-        key = (chrom, pos)
-        if key not in pos_to_rsid:
-            pos_to_rsid[key] = r["snp"]
+
+    with gzip.open(path, "rt") as f:
+        header = f.readline().strip()
+        sep = "\t" if "\t" in header else " "
+
+        for line in f:
+            parts = line.strip().split(sep)
+            if len(parts) < 2:
+                continue
+            rsid = parts[0]
+            chrom, pos = None, None
+            for p in parts[1:]:
+                if ":" in p and p.replace("chr", "").split(":")[0].isdigit():
+                    cp = p.replace("chr", "").split(":")
+                    chrom, pos = cp[0], int(cp[1])
+                    break
+                if chrom is None and (p.startswith("chr") or p.isdigit()):
+                    if p.startswith("chr"):
+                        chrom = p.replace("chr", "")
+                    elif p.isdigit() and chrom is not None:
+                        pos = int(p)
+                        break
+                    elif p.isdigit() and len(p) <= 2:
+                        chrom = p
+                    elif p.isdigit() and len(p) > 2:
+                        pos = int(p)
+                        break
+            if chrom and pos:
+                rsid_to_pos[rsid] = (chrom, pos)
+                key = (chrom, pos)
+                if key not in pos_to_rsid:
+                    pos_to_rsid[key] = rsid
+
     return rsid_to_pos, pos_to_rsid
 
 
