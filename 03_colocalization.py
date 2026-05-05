@@ -282,7 +282,7 @@ def _coloc_one_locus(args):
 
     results = []
     for ct_name, ct_prefix in BRYOIS_CT_PREFIX.items():
-        eqtl = load_bryois_region(ct_prefix, chrom, gene, gwas_positions)
+        eqtl = load_bryois_region(ct_prefix, chrom, gene, None)
         if eqtl is None or eqtl.empty:
             results.append({
                 "locus": locus, "gene": gene, "cell_type": ct_name,
