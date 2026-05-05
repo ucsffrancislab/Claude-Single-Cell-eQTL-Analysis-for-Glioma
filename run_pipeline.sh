@@ -4,22 +4,17 @@ set -euo pipefail
 # run_pipeline.sh — Master orchestrator for the glioma sc-eQTL pipeline.
 #
 # Usage:
-#   cd /path/to/pipeline
-#   bash run_pipeline.sh [--cpus N] [--skip-download] [--skip-census] [--skip-coloc]
+#   bash run_pipeline.sh [OPTIONS]
 #
-# The pipeline runs 6 steps in order:
-#   Step 0: Download Bryois data (parallel, needs internet)
-#   Step 1: CELLxGENE expression profiling (needs internet / S3)
-#   Step 2: eQTL lookup (CPU-parallel, offline OK)
-#   Step 3: Colocalization (optional, needs GWAS sumstats)
-#   Step 4: Visualization (offline)
-#   Step 5: Compile results & interpretation (offline)
+#   --work-dir DIR   Data/output directory (default: current directory)
+#   --venv DIR       Activate Python venv at DIR before running
+#   --cpus N         Worker processes (default: auto-detect from SLURM)
+#   --skip-download  Skip Bryois data download
+#   --skip-census    Skip CELLxGENE expression profiling
+#   --skip-coloc     Skip colocalization
 #
 
 # ── Locate pipeline root (where this script lives) ──────────────────────────
-# Under SLURM, sbatch copies the script to a spool directory so dirname "$0"
-# points to the wrong place.  Use scontrol to recover the original path.
-# Outside SLURM (interactive/local), dirname "$0" works fine.
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     SCRIPT_DIR=$(dirname "$(scontrol show job "$SLURM_JOB_ID" \
         | awk '/Command=/{sub(/.*Command=/, ""); print $1}')")
@@ -28,23 +23,11 @@ else
 fi
 export SCEQTL_PIPELINE_DIR="${SCRIPT_DIR}"
 
-# Work directory: --work-dir, or SCEQTL_WORK_DIR, or current directory
-if [[ -n "${WORK_DIR}" ]]; then
-    export SCEQTL_WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
-elif [[ -z "${SCEQTL_WORK_DIR:-}" ]]; then
-    export SCEQTL_WORK_DIR="$(pwd)"
-fi
-cd "${SCEQTL_WORK_DIR}"
-
-# Ensure Python can find config.py and other pipeline modules in SCRIPT_DIR
-export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
-
-# ---------- Parse arguments ----------
+# ── Parse arguments ──────────────────────────────────────────────────────────
 CPUS=0
 SKIP_DOWNLOAD=false
 SKIP_CENSUS=false
 SKIP_COLOC=false
-
 WORK_DIR=""
 VENV=""
 
@@ -70,7 +53,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ---------- Activate venv ----------
+# ── Activate venv (if requested) ────────────────────────────────────────────
 if [[ -n "${VENV}" ]]; then
     if [[ -f "${VENV}/bin/activate" ]]; then
         source "${VENV}/bin/activate"
@@ -80,21 +63,32 @@ if [[ -n "${VENV}" ]]; then
     fi
 fi
 
-# ---------- CPU detection ----------
+# ── Work directory ───────────────────────────────────────────────────────────
+if [[ -n "${WORK_DIR}" ]]; then
+    export SCEQTL_WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
+elif [[ -z "${SCEQTL_WORK_DIR:-}" ]]; then
+    export SCEQTL_WORK_DIR="$(pwd)"
+fi
+cd "${SCEQTL_WORK_DIR}"
+
+# Ensure Python can find config.py and other pipeline modules
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+# ── CPU detection ────────────────────────────────────────────────────────────
 if [[ "${CPUS}" -eq 0 ]]; then
-    # SLURM-aware: use allocated CPUs, not total node CPUs
     CPUS=${SLURM_CPUS_PER_TASK:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || 4)}
 fi
+
 echo "============================================================"
 echo " Glioma Single-Cell eQTL Pipeline"
 echo " $(date)"
-echo " CPUs: ${CPUS}"
-echo " Scripts:      ${SCRIPT_DIR}
- Work dir:     ${SCEQTL_WORK_DIR}"
+echo " CPUs:        ${CPUS}"
+echo " Scripts:     ${SCRIPT_DIR}"
+echo " Work dir:    ${SCEQTL_WORK_DIR}"
 echo "============================================================"
 echo ""
 
-# ---------- Dependency check ----------
+# ── Dependency check ─────────────────────────────────────────────────────────
 echo "--- Checking dependencies ---"
 MISSING=()
 
@@ -107,24 +101,23 @@ python3 -c "import requests"    2>/dev/null || MISSING+=("requests")
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     echo "ERROR: Missing Python packages: ${MISSING[*]}"
-    echo "Install with: pip install -r requirements.txt"
+    echo "Install with: pip install -r ${SCRIPT_DIR}/requirements.txt"
     exit 1
 fi
 echo "  Core packages OK"
 
-# Check optional Census dependencies
 if [[ "${SKIP_CENSUS}" == "false" ]]; then
     python3 -c "import cellxgene_census" 2>/dev/null || {
         echo "WARNING: cellxgene_census not installed — step 01 will fail."
         echo "  Install with: pip install cellxgene-census tiledbsoma"
-        echo "  Or re-run with --skip-census to skip expression profiling."
+        echo "  Or re-run with --skip-census"
         echo ""
     }
 fi
 
 echo ""
 
-# ---------- Step 0: Download ----------
+# ── Step 0: Download ─────────────────────────────────────────────────────────
 STEP_START=$(date +%s)
 if [[ "${SKIP_DOWNLOAD}" == "true" ]]; then
     echo "=== Step 0: Download (SKIPPED) ==="
@@ -135,7 +128,7 @@ fi
 echo "  Step 0: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
-# ---------- Step 1: Expression profiling ----------
+# ── Step 1: Expression profiling ─────────────────────────────────────────────
 STEP_START=$(date +%s)
 if [[ "${SKIP_CENSUS}" == "true" ]]; then
     echo "=== Step 1: Expression profiling (SKIPPED) ==="
@@ -146,14 +139,14 @@ fi
 echo "  Step 1: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
-# ---------- Step 2: eQTL lookup ----------
+# ── Step 2: eQTL lookup ─────────────────────────────────────────────────────
 STEP_START=$(date +%s)
 echo "=== Step 2: Parallel eQTL lookup ==="
 python3 "${SCRIPT_DIR}/02_eqtl_lookup.py" --cpus "${CPUS}"
 echo "  Step 2: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
-# ---------- Step 3: Colocalization ----------
+# ── Step 3: Colocalization ───────────────────────────────────────────────────
 STEP_START=$(date +%s)
 if [[ "${SKIP_COLOC}" == "true" ]]; then
     echo "=== Step 3: Colocalization (SKIPPED) ==="
@@ -164,21 +157,21 @@ fi
 echo "  Step 3: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
-# ---------- Step 4: Visualization ----------
+# ── Step 4: Visualization ───────────────────────────────────────────────────
 STEP_START=$(date +%s)
 echo "=== Step 4: Visualization ==="
 python3 "${SCRIPT_DIR}/04_visualization.py"
 echo "  Step 4: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
-# ---------- Step 5: Compile ----------
+# ── Step 5: Compile ─────────────────────────────────────────────────────────
 STEP_START=$(date +%s)
 echo "=== Step 5: Compile results & interpretation ==="
 python3 "${SCRIPT_DIR}/05_compile_results.py"
 echo "  Step 5: $(( $(date +%s) - STEP_START ))s elapsed"
 echo ""
 
-# ---------- Summary ----------
+# ── Summary ──────────────────────────────────────────────────────────────────
 echo "============================================================"
 echo " Pipeline complete!"
 echo " $(date)"
